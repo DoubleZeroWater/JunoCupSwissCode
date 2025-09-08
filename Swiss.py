@@ -342,4 +342,4 @@ def main(file_path):
     # print_standings(sorted_teams)
 
 if __name__ == "__main__":
-    main("/workspaces/result.txt")
+    main("result.txt")
