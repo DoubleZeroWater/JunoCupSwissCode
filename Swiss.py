@@ -1,7 +1,7 @@
 import sys
 from collections import defaultdict
 from wcwidth import wcswidth
-
+from collections import deque
 # 均为了模拟toornment的结果，因为toornment不提供具体小分，以toornment为准
 class TeamStats:
     def __init__(self, name):
@@ -239,84 +239,132 @@ def print_standings(sorted_teams):
         ]
         line = "".join(align_text(v, w) for v, w in zip(values, widths))
         print(line)
+    # Output to csv:
+    with open("standings.csv", "w", encoding="utf-8") as f:
+        f.write(",".join(headers) + "\n")
+        for idx, team in enumerate(sorted_teams, 1):
+            h2h_mp = getattr(team, 'h2h_mp', 0)
+            h2h_sp = getattr(team, 'h2h_sp', 0)
+            values = [
+                idx, team.name, team.match_points, team.buchholz,
+                team.small_points, h2h_mp, h2h_sp, team.cumulative_score, team.seed
+            ]
+            f.write(",".join(map(str, values)) + "\n")
 def generate_pairings(sorted_teams, previous_rounds):
     """
-    生成下一轮对阵（Opposite pairing，避免重复对局，偶数优先组内对称配对，奇数下浮到下一组第一名）。
+    生成下一轮对阵（Opposite pairing，避免重复对局）。
+    规则重点：
+      - 组内按顺序第1名配最后一名（opposite pairing）。
+      - 上组下浮的队列（FIFO）优先匹配本组的第1名（若第1名已被配走则匹配组内第一个可配对队伍）。
+      - 若队伍在当前组无法配对，则下浮到下一组（可能产生多个下浮队伍）。
+      - 所有组处理完后，尝试在剩余下浮队伍间配对；仍无法配对的则轮空（BYE）。
     输入：
-      - sorted_teams: 按当前排名（从高到低）排序的 TeamStats 列表（每个对象有 .name, .match_points）
+      - sorted_teams: 按当前排名（从高到低）排序的 TeamStats 列表
       - previous_rounds: 历史对局，list of rounds，每轮为[(team1, team2, score1, score2), ...]
     返回：
       - pairings: list of (teamA_name, teamB_name)；若轮空则为 ("TeamName", "BYE")
     """
+    from collections import deque
+
     # 构建已对阵集合（名字排序的 tuple），用于快速查重
     played_pairs = set()
     for matches in previous_rounds:
         for t1, t2, _, _ in matches:
-            # skip BYE 或 None
             if t1 and t2:
                 played_pairs.add(tuple(sorted([t1, t2])))
 
-    # 按得分分组（保持 sorted_teams 的组内次序）
+    # 按得分分组（保持 sorted_teams 的组内次序，高分在前）
     score_groups = {}
     for team in sorted_teams:
         score_groups.setdefault(team.match_points, []).append(team)
 
-    # 由高分到低分处理
+    groups = [score_groups[s][:] for s in sorted(score_groups.keys(), reverse=True)]
+
     pairings = []
-    carry_over = None  # 从上一组“下浮”的队伍（若存在）
+    carry_queue = deque()  # FIFO，下浮队列（来自上组未能配对的队，先到先匹配本组第1名）
 
-    for score in sorted(score_groups.keys(), reverse=True):
-        group = score_groups[score].copy()  # 复制，避免污染原列表
+    # 逐组处理（高分到低分）
+    for group in groups:
+        # group 是列表，保持原有次序（第0项为组内第1名）
+        next_carry = deque()
 
-        # 如果有上组下浮队伍，先把它与本组第一个可配对的队伍配对
-        if carry_over:
+        # 1) 优先尝试为 carry_queue 中的每个下浮队伍找本组对手（优先第1名）
+        while carry_queue and group:
+            floater = carry_queue.popleft()
             matched = False
+            # 优先尝试组首（index 0），然后往后寻找第一个未曾对阵者
             for idx, candidate in enumerate(group):
-                key = tuple(sorted([carry_over.name, candidate.name]))
+                key = tuple(sorted([floater.name, candidate.name]))
                 if key not in played_pairs:
-                    pairings.append((carry_over.name, candidate.name))
+                    pairings.append((floater.name, candidate.name))
                     played_pairs.add(key)
                     group.pop(idx)
                     matched = True
                     break
-            if not matched and group:
-                # 如果本组所有人都曾打过该队，强制与本组第一个配对（按你的规则“顺延一位继续尝试”，此处选择最保守的 fallback）
-                candidate = group.pop(0)
-                pairings.append((carry_over.name, candidate.name))
-                played_pairs.add(tuple(sorted([carry_over.name, candidate.name])))
-            carry_over = None
+            if not matched:
+                # 本组无人可配，继续下沉
+                next_carry.append(floater)
 
-        # 组内 Opposite pairing（用可变列表 indices = group_copy）
-        indices = group[:]  # 直接元素为 TeamStats 对象
-        while len(indices) > 1:
-            t1 = indices[0]  # 当前要配对的“头部”队（第1名，或被上浮后的队）
-            found_partner = False
-            # 从尾部向中间寻找第一个未打过的对手
-            for k in range(len(indices)-1, 0, -1):
-                t2 = indices[k]
+        # 若 carry_queue 中还有未处理者（因为 group 为空），全部下沉
+        while carry_queue:
+            next_carry.append(carry_queue.popleft())
+
+        # 2) 组内按 opposite pairing（第1 vs 最后）配对，遇到曾对过的尽量在尾部寻找可配对者
+        # 使用while循环保持对 group 动态修改
+        while len(group) >= 2:
+            t1 = group[0]  # 组内第1名
+            found = False
+            # 从尾部向前找第一个可配对的
+            for k in range(len(group)-1, 0, -1):
+                t2 = group[k]
                 key = tuple(sorted([t1.name, t2.name]))
                 if key not in played_pairs:
-                    # 找到可配对的对手
                     pairings.append((t1.name, t2.name))
                     played_pairs.add(key)
-                    # 从 indices 中移除两个已配对队伍（先移后面的再移前面的保证索引正确）
-                    indices.pop(k)
-                    indices.pop(0)
-                    found_partner = True
+                    # 移除已配对的两个：先移后面的再移前面的
+                    group.pop(k)
+                    group.pop(0)
+                    found = True
                     break
-            if not found_partner:
-                # t1 与组内所有剩余队都已经打过了 -> 下浮到下一组（carry_over）
-                carry_over = indices.pop(0)
-                # 继续尝试为剩下的队伍配对（不丢弃当前组的剩余）
-                # 注意：不改变 played_pairs，这样剩下的队仍按规则继续配对
+            if not found:
+                # t1 与组内所有人都已对过 -> 下浮
+                next_carry.append(group.pop(0))
 
-        # 若循环结束后 indices 中剩下 1 个队伍，则它将下浮到下一组
-        if len(indices) == 1:
-            carry_over = indices.pop(0)
+        # 3) 若组内剩1人，则该人下浮
+        if len(group) == 1:
+            next_carry.append(group.pop(0))
 
-    # 全部组处理完毕，如果还有 carry_over 就轮空（BYE）
-    if carry_over:
-        pairings.append((carry_over.name, "BYE"))
+        # 准备进入下一组
+        carry_queue = next_carry
+
+    # 所有组处理完毕，尝试在剩余的下浮队伍间配对（同样避免重复对局）
+    remaining = list(carry_queue)
+    unmatched = []
+    used = [False] * len(remaining)
+
+    for i in range(len(remaining)):
+        if used[i]:
+            continue
+        t1 = remaining[i]
+        found = False
+        # 从后向前找可配对者
+        for j in range(len(remaining)-1, i, -1):
+            if used[j]:
+                continue
+            t2 = remaining[j]
+            key = tuple(sorted([t1.name, t2.name]))
+            if key not in played_pairs:
+                pairings.append((t1.name, t2.name))
+                played_pairs.add(key)
+                used[i] = used[j] = True
+                found = True
+                break
+        if not found:
+            unmatched.append(t1)
+
+    # 仍有无法配对的队伍，给出 BYE（一般最多会有1个，若有多个则都轮空——实际比赛规则可自行调整）
+    for t in unmatched:
+        pairings.append((t.name, "BYE"))
 
     return pairings
 
@@ -330,10 +378,10 @@ def main(file_path):
     sorted_teams = compute_tiebreakers(team_stats)
     print_standings(sorted_teams)
     pairings = generate_pairings(sorted_teams, rounds)
-
+    print("\nNext Round Pairings:")
     # 打印结果
-    for a, b in pairings:
-        print(f"{a}\t")
+    for a in pairings:
+        print(f"{a[0]}\t")
     print("="*160)
     for a, b in pairings:
         print(f"{b}\t")
