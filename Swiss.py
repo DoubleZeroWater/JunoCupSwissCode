@@ -1,393 +1,307 @@
-import sys
-from collections import defaultdict
-from wcwidth import wcswidth
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import List, Dict, Tuple, Optional
 from collections import deque
-# 均为了模拟toornment的结果，因为toornment不提供具体小分，以toornment为准
+from wcwidth import wcswidth
+
+# -----------------------------
+# 数据结构
+# -----------------------------
+@dataclass
+class RoundResult:
+    round_index: int
+    opponent: Optional[str]          # 对手名称；None 代表轮空
+    match_point: float               # 大分 (1 / 0.5 / 0)
+    small_point: int                 # 小分差 (score_for - score_against)
+
+@dataclass
 class TeamStats:
-    def __init__(self, name):
-        self.name = name
-        self.match_points = 0
-        self.small_points = 0
-        self.opponents = []
-        self.round_results = []  # (round_index, opponent, match_point, small_point)
-        self.seed = None         # 初始种子顺位
-    
-    def __repr__(self):
-        return self.name
+    name: str
+    seed: int
+    match_points: float = 0.0
+    small_points: int = 0
+    opponents: List[Optional[str]] = field(default_factory=list)
+    round_results: List[RoundResult] = field(default_factory=list)
+    buchholz: float = 0.0
+    cumulative_rounds: List[float] = field(default_factory=list)
+    cumulative_score: float = 0.0
+    cop: float = 0.0
+    # 直接对比用
+    h2h_mp: int = 0
+    h2h_sp: int = 0
+    h2h_wins: int = 0
+    h2h_sp_diff: int = 0
 
-def parse_input(file_path):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        lines = [line.strip() for line in f if line.strip()]
-    
-    team_names = []
+    def add_match(self, rnd: int, opp: Optional[str], score_for: int, score_against: int):
+        if opp is None:
+            mp = 1.0  # 轮空给 1 分可自行调整
+            sp_diff = 0
+        else:
+            if score_for > score_against:
+                mp = 1.0
+            elif score_for == score_against:
+                mp = 0.5
+            else:
+                mp = 0.0
+            sp_diff = score_for - score_against
+        self.match_points += mp
+        self.small_points += sp_diff
+        self.opponents.append(opp)
+        self.round_results.append(RoundResult(rnd, opp, mp, sp_diff))
+
+# -----------------------------
+# 解析 / 读取
+# -----------------------------
+def parse_input(path: str) -> Tuple[Dict[str, TeamStats], List[List[Tuple[str, str, int, int]]]]:
+    with open(path, 'r', encoding='utf-8') as f:
+        lines = [l.strip() for l in f if l.strip()]
     i = 0
-    while not lines[i].isdigit():
-        team_names.append(lines[i])
-        i += 1
-
-    team_stats = {}
-    for seed, name in enumerate(team_names, start=1):
-        team = TeamStats(name)
-        team.seed = seed  # 保存初始种子顺位
-        team_stats[name] = team
-
-    rounds = []
+    team_names: List[str] = []
+    while i < len(lines) and not lines[i].isdigit():
+        team_names.append(lines[i]); i += 1
+    teams: Dict[str, TeamStats] = {n: TeamStats(n, seed+1) for seed, n in enumerate(team_names)}
+    rounds: List[List[Tuple[str, str, int, int]]] = []
     while i < len(lines):
-        round_index = int(lines[i])
-        i += 1
+        _ = int(lines[i]); i += 1
         matches = []
         while i < len(lines) and not lines[i].isdigit():
-            team1, team2, score1, score2 = lines[i].split(',')
-            matches.append((team1, team2, int(score1), int(score2)))
+            t1, t2, s1, s2 = lines[i].split(',')
+            matches.append((t1, t2, int(s1), int(s2)))
             i += 1
         rounds.append(matches)
+    return teams, rounds
 
-    return team_stats, rounds
+# -----------------------------
+# 统计计算
+# -----------------------------
+def process_rounds(teams: Dict[str, TeamStats], rounds: List[List[Tuple[str, str, int, int]]]) -> None:
+    for rnd_idx, matches in enumerate(rounds, 1):
+        for t1, t2, s1, s2 in matches:
+            teams[t1].add_match(rnd_idx, t2, s1, s2)
+            teams[t2].add_match(rnd_idx, t1, s2, s1)
 
-def process_rounds(team_stats, rounds):
-    round_number = 0
-    for matches in rounds:
-        round_number += 1
-        played = set()
-        for team1, team2, score1, score2 in matches:
-            played.add(team1)
-            played.add(team2)
-            win1 = 1 if score1 > score2 else 0
-            win2 = 1 if score2 > score1 else 0
-            team_stats[team1].match_points += win1
-            team_stats[team1].small_points += (score1 - score2)
-            team_stats[team1].opponents.append(team2)
-            team_stats[team1].round_results.append((round_number, team2, win1, (score1 - score2)))
+def compute_buchholz(teams: Dict[str, TeamStats]) -> None:
+    for t in teams.values():
+        t.buchholz = sum(teams[opp].match_points for opp in t.opponents if opp in teams)
 
-            team_stats[team2].match_points += win2
-            team_stats[team2].small_points += (score2 - score1)
-            team_stats[team2].opponents.append(team1)
-            team_stats[team2].round_results.append((round_number, team1, win2, (score2 - score1)))
+def compute_cumulative_scores(teams: Dict[str, TeamStats], total_rounds: int) -> None:
+    # 逐轮累计（轮空按已存在 round_results 中 mp 计算）
+    for t in teams.values():
+        t.cumulative_rounds.clear()
+        running = 0.0
+        for r in range(1, total_rounds + 1):
+            rr = next((x for x in t.round_results if x.round_index == r), None)
+            running += rr.match_point if rr else 0.0
+            t.cumulative_rounds.append(running)
+        t.cumulative_score = sum(t.cumulative_rounds)
 
-def compute_buchholz(team_stats):
-    for team in team_stats.values():
-        team.buchholz = sum(team_stats[opp].match_points for opp in team.opponents if opp)
+def compute_cop(teams: Dict[str, TeamStats]) -> None:
+    for t in teams.values():
+        t.cop = sum(teams[o].cumulative_score for o in t.opponents if o in teams)
 
-# def compute_cumulative_opponent_points(team_stats, bye_value=0):
-#     """计算每支队伍的 Cumulative Opponent Points (COP)，公式化实现。"""
-#     for team in team_stats.values():
-#         rounds_sorted = sorted(team.round_results, key=lambda x: x[0])
-        
-#         # 获取每轮对手的最终积分
-#         mp_list = []
-#         for _, opp, *rest in rounds_sorted:
-#             if opp is None:  # 轮空
-#                 mp_list.append(bye_value)
-#             elif isinstance(opp, str):
-#                 mp_list.append(getattr(team_stats.get(opp), "match_points", bye_value))
-#             else:
-#                 mp_list.append(getattr(opp, "match_points", bye_value))
-        
-#         R = len(mp_list)
-#         # 直接用公式计算 COP
-#         team.cop = sum((R - i) * mp for i, mp in enumerate(mp_list))
-
-def compute_cumulative_scores(team_stats, rounds, bye_value_full=1, bye_value_half=0.5):
-    """
-    根据 FIDE 34E3 定义计算 cumulative score（累计得分表）。
-    每个队伍会得到 team.cumulative_score (用于 COP 的计算)。
-    """
-    # 初始化
-    for team in team_stats.values():
-        team.cumulative_rounds = []  # 每轮累计大分
-        team.cumulative_score = 0.0  # 总累计大分
-
-    # 按轮次计算
-    for round_idx, matches in enumerate(rounds, 1):
-        for team in team_stats.values():
-            # 找到该队伍这一轮的结果
-            result = next((r for r in team.round_results if r[0] == round_idx), None)
-            if result:
-                _, _, mp, _ = result
-                if mp == 1:
-                    score = 1.0
-                elif mp == 0:
-                    score = 0.0
-                else:
-                    score = 0.5  # 支持平局
-            else:
-                # 没有对局，轮空
-                score = 0.0
-
-            prev = team.cumulative_rounds[-1] if team.cumulative_rounds else 0.0
-            new_val = prev + score
-            team.cumulative_rounds.append(new_val)
-
-    # 计算 cumulative_score
-    for team in team_stats.values():
-        if len(team.cumulative_rounds) > 1:
-            team.cumulative_score = sum(team.cumulative_rounds[:-1])
-            # team.cumulative_score = sum(team.cumulative_rounds)
-        else:
-            team.cumulative_score = sum(team.cumulative_rounds)
-
-        # 调整轮空分数
-        for rnd, opp, mp, _ in team.round_results:
-            if opp is None:
-                if mp == 1:  # 全分轮空
-                    team.cumulative_score -= bye_value_full
-                elif mp == 0.5:  # 半分轮空
-                    team.cumulative_score -= bye_value_half
-
-
-def compute_cop(team_stats):
-    """
-    根据 FIDE 34E9 定义计算 COP（Cumulative scores of opposition）。
-    COP = 所有对手 cumulative_score 之和
-    """
-    for team in team_stats.values():
-        cop = 0.0
-        for opp in team.opponents:
-            if opp and opp in team_stats:
-                cop += team_stats[opp].cumulative_score
-        team.cop = cop
-
-def compute_tiebreakers(team_stats, COP = True):
-    sorted_teams = list(team_stats.values())
-
-    def tiebreak_key(team):
-        return (
-            team.match_points,   # 总大分积分
-            team.buchholz,       # 布赫霍尔茨
-            team.small_points,   # 总小分
-        )
-
-    sorted_teams.sort(key=tiebreak_key, reverse=True)
+def compute_tiebreakers(teams: Dict[str, TeamStats], use_cop: bool = True) -> List[TeamStats]:
+    lst = list(teams.values())
+    base_key = lambda x: (x.match_points, x.buchholz, x.small_points)
+    lst.sort(key=base_key, reverse=True)
 
     i = 0
-    while i < len(sorted_teams):
+    while i < len(lst):
         j = i
-        while j < len(sorted_teams) and tiebreak_key(sorted_teams[i]) == tiebreak_key(sorted_teams[j]):
+        while j < len(lst) and base_key(lst[j]) == base_key(lst[i]):
             j += 1
-
-        group = sorted_teams[i:j]
-        h2h_stats = {}
-
-        if j - i > 1:
-            for team in group:
-                h2h_mp = 0
-                h2h_sp = 0
-                h2h_wins = 0
-                h2h_sp_diff = 0
-                for rnd, opp, mp, sp in team.round_results:
-                    if opp in [t.name for t in group]:
-                        h2h_mp += mp
-                        h2h_sp += sp
-                        if mp == 1:
+        group = lst[i:j]
+        if len(group) > 1:
+            name_set = {g.name for g in group}
+            # 计算组内对比
+            for g in group:
+                h2h_mp = h2h_sp = h2h_wins = h2h_sp_diff = 0
+                for rr in g.round_results:
+                    if rr.opponent in name_set:
+                        h2h_mp += rr.match_point
+                        h2h_sp += rr.small_point
+                        h2h_sp_diff += rr.small_point
+                        if rr.match_point == 1.0:
                             h2h_wins += 1
-                        h2h_sp_diff += sp
-                h2h_stats[team.name] = (h2h_mp, h2h_sp, h2h_wins, h2h_sp_diff)
-            if COP:
-                group.sort(
-                    key=lambda t: (
-                        h2h_stats[t.name][0],  # H2H 大分
-                        h2h_stats[t.name][1],  # H2H 小分
-                        h2h_stats[t.name][2],  # 规则 4：大分胜场数
-                        h2h_stats[t.name][3],  # 规则 5：小分差
-                        t.cumulative_score,    # 累计对手分
-                        -t.seed                # 初始种子顺位（seed 越小优先级越高）
-                    ),
-                    reverse=True
-                )
+                g.h2h_mp, g.h2h_sp, g.h2h_wins, g.h2h_sp_diff = h2h_mp, h2h_sp, h2h_wins, h2h_sp_diff
+            if use_cop:
+                group.sort(key=lambda g: (
+                    g.h2h_mp,
+                    g.h2h_sp,
+                    g.h2h_wins,
+                    g.h2h_sp_diff,
+                    g.cop,
+                    g.cumulative_score,
+                    -g.seed
+                ), reverse=True)
             else:
-                group.sort(
-                    key=lambda t: (
-                        h2h_stats[t.name][0],  # H2H 大分
-                        h2h_stats[t.name][1],  # H2H 小分
-                        h2h_stats[t.name][2],  # 规则 4：大分胜场数
-                        h2h_stats[t.name][3],  # 规则 5：小分差
-                        -t.seed                # 初始种子顺位（seed 越小优先级越高）
-                    ),
-                    reverse=True
-                )
-        else:
-            team = group[0]
-            h2h_stats[team.name] = (-1, -1, -1, -1)
-
-        sorted_teams[i:j] = group
-        for team in group:
-            team.h2h_mp, team.h2h_sp, team.h2h_wins, team.h2h_sp_diff = h2h_stats[team.name]
+                group.sort(key=lambda g: (
+                    g.h2h_mp,
+                    g.h2h_sp,
+                    g.h2h_wins,
+                    g.h2h_sp_diff,
+                    g.cumulative_score,
+                    -g.seed
+                ), reverse=True)
+            lst[i:j] = group
         i = j
+    return lst
 
-    return sorted_teams
-
-def align_text(text, width):
-    """对齐中英文混合字符串"""
-    text = str(text)
-    display_width = wcswidth(text)
-    pad = width - display_width
-    return text + " " * max(0, pad)
-
-def print_standings(sorted_teams):
-    headers = ["Rank", "Team", "Score", "Buchholz", "Map Diff", "H2H Score", "H2H MapDiff", "Cumulative", "seed"]
-    widths = [5, 30, 10, 10, 10, 12, 15, 12, 6]
-
-    header_line = "".join(align_text(h, w) for h, w in zip(headers, widths))
-    print(header_line)
-
-    for idx, team in enumerate(sorted_teams, 1):
-        h2h_mp = getattr(team, 'h2h_mp', 0)
-        h2h_sp = getattr(team, 'h2h_sp', 0)
-        values = [
-            idx, team.name, team.match_points, team.buchholz,
-            team.small_points, h2h_mp, h2h_sp, team.cumulative_score, team.seed
-        ]
-        line = "".join(align_text(v, w) for v, w in zip(values, widths))
-        print(line)
-    # Output to csv:
-    with open("standings.csv", "w", encoding="utf-8") as f:
-        f.write(",".join(headers) + "\n")
-        for idx, team in enumerate(sorted_teams, 1):
-            h2h_mp = getattr(team, 'h2h_mp', 0)
-            h2h_sp = getattr(team, 'h2h_sp', 0)
-            values = [
-                idx, team.name, team.match_points, team.buchholz,
-                team.small_points, h2h_mp, h2h_sp, team.cumulative_score, team.seed
-            ]
-            f.write(",".join(map(str, values)) + "\n")
-def generate_pairings(sorted_teams, previous_rounds):
-    """
-    生成下一轮对阵（Opposite pairing，避免重复对局）。
-    规则重点：
-      - 组内按顺序第1名配最后一名（opposite pairing）。
-      - 上组下浮的队列（FIFO）优先匹配本组的第1名（若第1名已被配走则匹配组内第一个可配对队伍）。
-      - 若队伍在当前组无法配对，则下浮到下一组（可能产生多个下浮队伍）。
-      - 所有组处理完后，尝试在剩余下浮队伍间配对；仍无法配对的则轮空（BYE）。
-    输入：
-      - sorted_teams: 按当前排名（从高到低）排序的 TeamStats 列表
-      - previous_rounds: 历史对局，list of rounds，每轮为[(team1, team2, score1, score2), ...]
-    返回：
-      - pairings: list of (teamA_name, teamB_name)；若轮空则为 ("TeamName", "BYE")
-    """
-    from collections import deque
-
-    # 构建已对阵集合（名字排序的 tuple），用于快速查重
-    played_pairs = set()
+# -----------------------------
+# 配对算法（Opposite + 浮动）
+# -----------------------------
+def generate_pairings(sorted_teams: List[TeamStats],
+                      previous_rounds: List[List[Tuple[str, str, int, int]]]) -> List[Tuple[str, str]]:
+    # 已对阵集合
+    played = set()
     for matches in previous_rounds:
-        for t1, t2, _, _ in matches:
-            if t1 and t2:
-                played_pairs.add(tuple(sorted([t1, t2])))
+        for a, b, _, _ in matches:
+            if a and b:
+                played.add(tuple(sorted((a, b))))
 
-    # 按得分分组（保持 sorted_teams 的组内次序，高分在前）
-    score_groups = {}
-    for team in sorted_teams:
-        score_groups.setdefault(team.match_points, []).append(team)
+    # 分组
+    groups_map: Dict[float, List[TeamStats]] = {}
+    for t in sorted_teams:
+        groups_map.setdefault(t.match_points, []).append(t)
+    groups: List[List[TeamStats]] = [groups_map[s] for s in sorted(groups_map.keys(), reverse=True)]
 
-    groups = [score_groups[s][:] for s in sorted(score_groups.keys(), reverse=True)]
+    pairings: List[Tuple[str, str]] = []
+    float_queue = deque()  # 下浮（FIFO）
 
-    pairings = []
-    carry_queue = deque()  # FIFO，下浮队列（来自上组未能配对的队，先到先匹配本组第1名）
-
-    # 逐组处理（高分到低分）
     for group in groups:
-        # group 是列表，保持原有次序（第0项为组内第1名）
-        next_carry = deque()
+        next_float = deque()
 
-        # 1) 优先尝试为 carry_queue 中的每个下浮队伍找本组对手（优先第1名）
-        while carry_queue and group:
-            floater = carry_queue.popleft()
+        # 先处理下浮，与组内“第1名”优先匹配；若第1名已走，尝试下一个仍在的前端成员
+        while float_queue and group:
+            f = float_queue.popleft()
             matched = False
-            # 优先尝试组首（index 0），然后往后寻找第一个未曾对阵者
-            for idx, candidate in enumerate(group):
-                key = tuple(sorted([floater.name, candidate.name]))
-                if key not in played_pairs:
-                    pairings.append((floater.name, candidate.name))
-                    played_pairs.add(key)
+            # 先尝试组首
+            candidate_indices = list(range(len(group)))  # 0,1,2...
+            for idx in candidate_indices:
+                opponent = group[idx]
+                key = tuple(sorted((f.name, opponent.name)))
+                if key not in played:
+                    pairings.append((f.name, opponent.name))
+                    played.add(key)
                     group.pop(idx)
                     matched = True
                     break
             if not matched:
-                # 本组无人可配，继续下沉
-                next_carry.append(floater)
+                next_float.append(f)
 
-        # 若 carry_queue 中还有未处理者（因为 group 为空），全部下沉
-        while carry_queue:
-            next_carry.append(carry_queue.popleft())
+        # float_queue 里剩余的直接下沉
+        while float_queue:
+            next_float.append(float_queue.popleft())
 
-        # 2) 组内按 opposite pairing（第1 vs 最后）配对，遇到曾对过的尽量在尾部寻找可配对者
-        # 使用while循环保持对 group 动态修改
+        # 组内 opposite pairing（第1 vs 最后）
         while len(group) >= 2:
-            t1 = group[0]  # 组内第1名
-            found = False
-            # 从尾部向前找第一个可配对的
-            for k in range(len(group)-1, 0, -1):
-                t2 = group[k]
-                key = tuple(sorted([t1.name, t2.name]))
-                if key not in played_pairs:
-                    pairings.append((t1.name, t2.name))
-                    played_pairs.add(key)
-                    # 移除已配对的两个：先移后面的再移前面的
-                    group.pop(k)
-                    group.pop(0)
-                    found = True
+            first = group[0]
+            # 从最后向前找可配对的第一个
+            found_idx = -1
+            for k in range(len(group) - 1, 0, -1):
+                key = tuple(sorted((first.name, group[k].name)))
+                if key not in played:
+                    found_idx = k
                     break
-            if not found:
-                # t1 与组内所有人都已对过 -> 下浮
-                next_carry.append(group.pop(0))
+            if found_idx == -1:
+                # first 无法与组内任何队匹配 -> 下浮
+                next_float.append(group.pop(0))
+            else:
+                second = group[found_idx]
+                pairings.append((first.name, second.name))
+                played.add(tuple(sorted((first.name, second.name))))
+                # 移除 second 和 first
+                group.pop(found_idx)
+                group.pop(0)
 
-        # 3) 若组内剩1人，则该人下浮
+        # 若剩 1 人 -> 下浮
         if len(group) == 1:
-            next_carry.append(group.pop(0))
+            next_float.append(group.pop())
 
-        # 准备进入下一组
-        carry_queue = next_carry
+        float_queue = next_float
 
-    # 所有组处理完毕，尝试在剩余的下浮队伍间配对（同样避免重复对局）
-    remaining = list(carry_queue)
-    unmatched = []
+    # 处理所有剩余下浮队伍（互相尝试配）
+    remaining = list(float_queue)
     used = [False] * len(remaining)
-
     for i in range(len(remaining)):
         if used[i]:
             continue
         t1 = remaining[i]
-        found = False
-        # 从后向前找可配对者
-        for j in range(len(remaining)-1, i, -1):
+        matched = False
+        for j in range(len(remaining) - 1, i, -1):
             if used[j]:
                 continue
             t2 = remaining[j]
-            key = tuple(sorted([t1.name, t2.name]))
-            if key not in played_pairs:
+            key = tuple(sorted((t1.name, t2.name)))
+            if key not in played:
                 pairings.append((t1.name, t2.name))
-                played_pairs.add(key)
+                played.add(key)
                 used[i] = used[j] = True
-                found = True
+                matched = True
                 break
-        if not found:
-            unmatched.append(t1)
-
-    # 仍有无法配对的队伍，给出 BYE（一般最多会有1个，若有多个则都轮空——实际比赛规则可自行调整）
-    for t in unmatched:
-        pairings.append((t.name, "BYE"))
+        if not matched:
+            pairings.append((t1.name, "BYE"))
+            used[i] = True
 
     return pairings
 
+# -----------------------------
+# 输出
+# -----------------------------
+def align_text(text, width):
+    txt = str(text)
+    pad = width - wcswidth(txt)
+    return txt + " " * max(0, pad)
 
-def main(file_path):
-    team_stats, rounds = parse_input(file_path)
-    process_rounds(team_stats, rounds)
-    compute_buchholz(team_stats)
-    compute_cumulative_scores(team_stats, rounds)
-    compute_cop(team_stats)
-    sorted_teams = compute_tiebreakers(team_stats)
+def print_standings(sorted_teams: List[TeamStats]) -> None:
+    headers = ["Rank", "Team", "Score", "Buchholz", "MapDiff", "H2H Score", "H2H MapDiff",  "Cumulative", "Seed"]
+    widths  = [5,      28,     7,      9,         8,          10,          12,          12,             5]
+    line = "".join(align_text(h, w) for h, w in zip(headers, widths))
+    print(line)
+    for idx, t in enumerate(sorted_teams, 1):
+        vals = [
+            idx, t.name, t.match_points, t.buchholz, t.small_points,
+            t.h2h_mp, t.h2h_sp_diff, t.cumulative_score, t.seed
+        ]
+        print("".join(align_text(v, w) for v, w in zip(vals, widths)))
+
+def print_csv_standings(sorted_teams: List[TeamStats]) -> None:
+    headers = ["Rank", "Team", "Score", "Buchholz", "MapDiff", "H2H Score", "H2H MapDiff",  "Cumulative", "Seed"]
+    widths  = [5,      28,     7,      9,         8,          10,          12,          12,             5]
+    line = ",".join(str(h) for h in headers)
+    with open("standings.csv", "w", encoding="utf-8") as f:
+        f.write(line + "\n")
+        for idx, t in enumerate(sorted_teams, 1):
+            vals = [
+                idx, t.name, t.match_points, t.buchholz, t.small_points,
+                t.h2h_mp, t.h2h_sp_diff, t.cumulative_score, t.seed
+            ]
+            csv_line = ",".join(str(v) for v in vals)
+            f.write(csv_line + "\n")
+
+def print_pairings(pairings: List[Tuple[str, str]]) -> None:
+    print("\nNext Round Pairings:")
+    for a, b in pairings:
+        print(f"{a} \t {b}")
+
+# -----------------------------
+# 主流程
+# -----------------------------
+def run(file_path: str):
+    teams, rounds = parse_input(file_path)
+    process_rounds(teams, rounds)
+    compute_buchholz(teams)
+    compute_cumulative_scores(teams, len(rounds))
+    compute_cop(teams)
+    sorted_teams = compute_tiebreakers(teams, use_cop=False)
     print_standings(sorted_teams)
     pairings = generate_pairings(sorted_teams, rounds)
-    print("\nNext Round Pairings:")
-    # 打印结果
-    for a in pairings:
-        print(f"{a[0]}\t")
-    print("="*160)
-    for a, b in pairings:
-        print(f"{b}\t")
-    
-    # sorted_teams = compute_tiebreakers(team_stats, COP=False)
-    # print_standings(sorted_teams)
+    print_pairings(pairings)
+    print_csv_standings(sorted_teams)
+
+def main():
+    import sys
+    path = "result.txt" if len(sys.argv) < 2 else sys.argv[1]
+    run(path)
 
 if __name__ == "__main__":
-    main("result.txt")
+    main()
