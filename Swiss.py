@@ -84,14 +84,16 @@ def compute_buchholz(teams: Dict[str, TeamStats]) -> None:
     for t in teams.values():
         t.buchholz = sum(teams[opp].match_points for opp in t.opponents if opp in teams)
 
-def compute_cumulative_scores(teams: Dict[str, TeamStats], total_rounds: int) -> None:
-    # 逐轮累计（轮空按已存在 round_results 中 mp 计算）
+def compute_cumulative_scores(teams: Dict[str, TeamStats]) -> None:
+    # 逐队逐轮累计：不依赖 total_rounds，每队按自身已有的对局轮次进行累计
+    # 轮空已在 round_results 中以 mp 计入
     for t in teams.values():
+        # 按轮次排序，确保累计顺序正确
+        results = sorted(t.round_results, key=lambda x: x.round_index)
         t.cumulative_rounds.clear()
         running = 0.0
-        for r in range(1, total_rounds + 1):
-            rr = next((x for x in t.round_results if x.round_index == r), None)
-            running += rr.match_point if rr else 0.0
+        for rr in results:
+            running += rr.match_point
             t.cumulative_rounds.append(running)
         t.cumulative_score = sum(t.cumulative_rounds)
 
@@ -281,7 +283,10 @@ def print_csv_standings(sorted_teams: List[TeamStats]) -> None:
 def print_pairings(pairings: List[Tuple[str, str]]) -> None:
     print("\nNext Round Pairings:")
     for a, b in pairings:
-        print(f"{a} \t {b}")
+        print(f"{a}")
+    print("+"*20)  # 分隔
+    for a, b in pairings:
+        print(f"{b}")
 
 # -----------------------------
 # 主流程
@@ -290,7 +295,7 @@ def run(file_path: str):
     teams, rounds = parse_input(file_path)
     process_rounds(teams, rounds)
     compute_buchholz(teams)
-    compute_cumulative_scores(teams, len(rounds))
+    compute_cumulative_scores(teams)
     compute_cop(teams)
     sorted_teams = compute_tiebreakers(teams, use_cop=False)
     print_standings(sorted_teams)
