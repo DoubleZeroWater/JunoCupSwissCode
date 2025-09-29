@@ -199,11 +199,13 @@ def generate_pairings(sorted_teams: List[TeamStats],
             first = group[0]
             # 从最后向前找可配对的第一个
             found_idx = -1
+            print(first.name)
             for k in range(len(group) - 1, 0, -1):
                 key = tuple(sorted((first.name, group[k].name)))
                 if key not in played:
                     found_idx = k
                     break
+            print(group[found_idx].name if found_idx != -1 else "XX")
             if found_idx == -1:
                 # first 无法与组内任何队匹配 -> 下浮
                 next_float.append(group.pop(0))
@@ -287,6 +289,15 @@ def print_pairings(pairings: List[Tuple[str, str]]) -> None:
     print("+"*20)  # 分隔
     for a, b in pairings:
         print(f"{b}")
+    print("\nNext Round Pairings:")
+    for a, b in pairings:
+        print(f"{a}")
+        print(f"\n"*5)
+    print("+"*20)  # 分隔
+    for a, b in pairings:
+        print(f"{b}")
+        print(f"\n"*5)
+    
 
 # -----------------------------
 # 主流程
